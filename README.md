@@ -1,0 +1,1 @@
+This is playground project to get my hand dirty on LLVM tutorial: Build first front language Kaleidoscope.
