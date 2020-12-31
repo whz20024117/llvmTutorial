@@ -2,6 +2,7 @@
 #include <cctype>
 #include <memory>
 #include <vector>
+#include <unordered_map>
 
 
 enum Token {
@@ -10,12 +11,12 @@ enum Token {
     tok_def=-2,
     tok_extern=-3,
 
-    tok_identifier=-4, //IdentfierStr
+    tok_identifier=-4, //IdentifierStr
     tok_number=-5   //NumVal
 };
 
 
-static std::string IdentfierStr;
+static std::string IdentifierStr;
 static double NumVal;
 
 
@@ -28,19 +29,19 @@ static int gettok() // lexer
 
     if (isalpha(LastChar))  // first char cannot be number if it is keyword/variable
     {
-        IdentfierStr = LastChar;
+        IdentifierStr = LastChar;
         LastChar = getchar();
         
         while (isalnum(LastChar))
         {
-            IdentfierStr.push_back(LastChar);
+            IdentifierStr.push_back(LastChar);
             LastChar = getchar();
         }
 
-        if (IdentfierStr == "def")
+        if (IdentifierStr == "def")
             return tok_def;
 
-        if (IdentfierStr == "extern")
+        if (IdentifierStr == "extern")
             return tok_extern;
 
         return tok_identifier;
@@ -51,7 +52,7 @@ static int gettok() // lexer
         std::string NumStr;
         do 
         {
-            NumStr += LastChar;
+            NumStr.push_back(LastChar);
             LastChar = getchar();
         } while (isdigit(LastChar) || LastChar == '.');
 
@@ -59,7 +60,7 @@ static int gettok() // lexer
         return tok_number;
     }
 
-    if (LastChar = '#')   // comments
+    if (LastChar == '#')   // comments
     {
         do
         {
@@ -141,7 +142,7 @@ class PrototypeAST
     std::vector<std::string> Args;
 
 public:
-    PrototypeAST(const std::string &name, std::vector<std::string> &args)
+    PrototypeAST(const std::string &name, std::vector<std::string> args)
         : Name(name), Args(args) {}
 
     const std::string &getName() const 
@@ -185,6 +186,15 @@ uptrProto LogErrorP(const char *str)
     return nullptr;
 }
 
+// Forward declarations For parsing functions
+static uptrAST ParseNumberExpr();
+static uptrAST ParseExpression();
+static uptrAST ParsePrimary();
+static uptrAST ParseParenExpr();
+static uptrAST ParseIdentifierExpr();
+static uptrAST ParseBinOpRHS(int, uptrAST);
+
+
 // Expr Parsing
 static uptrAST ParseNumberExpr()
 {
@@ -198,5 +208,261 @@ static uptrAST ParseNumberExpr()
 static uptrAST ParseParenExpr()
 {
     getNextToken(); // ( gone
+
+    auto V = ParseExpression();
+
+    if (!V)
+        return nullptr;
+
+    if (Curtok != ')')
+        return LogError("expected ')'");
+
+    getNextToken(); // )
+    return V;
+}
+
+
+static uptrAST ParseIdentifierExpr()
+{
+    std::string IdName = IdentifierStr;
     
+    getNextToken();
+
+    if (Curtok != '(')  // form identifier are Variables
+        return std::unique_ptr<VariableExprAST>(new VariableExprAST(IdName));
+
+    getNextToken(); // ( gone
+
+
+    /* Identifier() is a call */
+    uptrArgsV Args;
+    if (Curtok != ')')
+    {
+        while (true)
+        {
+            if (auto Arg = ParseExpression())
+                Args.push_back(std::move(Arg));
+            else
+                return nullptr;
+
+            if (Curtok == ')')
+                break;
+
+            if (Curtok != ',')
+                return LogError("Expected ')' or ','");
+            getNextToken();
+        }
+    }
+
+    getNextToken();
+
+    return std::unique_ptr<CallExprAST>(new CallExprAST(IdName, std::move(Args)));   
+}
+
+static uptrAST ParsePrimary()
+{
+    switch (Curtok)
+    {
+    case tok_identifier:
+        return ParseIdentifierExpr();
+        break;
+    case tok_number:
+        return ParseNumberExpr();
+        break;
+    case '(':
+        return ParseParenExpr();
+        break;
+    default:
+        return LogError("Unknown Token");
+    }
+}
+
+// Binops
+static std::unordered_map<char, int> BinOpPrecedence;
+
+static int GetTokenPrecedence()
+{
+    if (!isascii(Curtok))
+        return -1;
+
+    if (BinOpPrecedence.find(Curtok) == BinOpPrecedence.end())
+    {
+        return -1;
+    }
+    else
+    {
+        return BinOpPrecedence[Curtok];
+    }
+    
+}
+
+
+static uptrAST ParseExpression()
+{
+    auto LHS = ParsePrimary();
+    if (!LHS)
+        return nullptr;
+
+    return ParseBinOpRHS(0, std::move(LHS));
+}
+
+
+static uptrAST ParseBinOpRHS(int ExprPrec, uptrAST LHS)
+{
+    while (true)
+    {
+        int TokPrec = GetTokenPrecedence();
+
+        if (TokPrec < ExprPrec) // ExprPrec start from 0, lease op token prec is 1.
+            return LHS;
+        
+        int BinOp = Curtok; // All non operation token will have prec = -1
+        getNextToken();
+
+        auto RHS = ParsePrimary();  // Recursively parse next
+        if (!RHS)
+            return nullptr;
+
+        int NextPrec = GetTokenPrecedence();
+        if (TokPrec < NextPrec)
+        {
+            /* If next precedent is higher, process next first */
+            RHS = ParseBinOpRHS(TokPrec+1, std::move(RHS));
+            if (!RHS)
+                return nullptr;
+        }
+        
+        // Merge lhs and rhs
+        LHS = std::unique_ptr<BinaryExprAST>(
+            new BinaryExprAST(BinOp, std::move(LHS), std::move(RHS))
+        );
+    }
+}
+
+// Prototype
+
+static uptrProto ParsePrototype()
+{
+    if (Curtok != tok_identifier)
+        return LogErrorP("Expected function name in prototype");
+    
+    std::string fnName = IdentifierStr;
+    getNextToken();
+
+    if (Curtok != '(')
+        return LogErrorP("Expected ( ");
+
+    std::vector<std::string> ArgNames;
+    while (getNextToken() == tok_identifier)
+        ArgNames.push_back(IdentifierStr);
+
+    if (Curtok != ')')
+        return LogErrorP("Expected )");
+
+    getNextToken();
+    
+    return std::unique_ptr<PrototypeAST>(
+        new PrototypeAST(fnName, std::move(ArgNames))
+    );
+}
+
+
+static std::unique_ptr<FunctionAST> ParseDefinition()
+{
+    getNextToken(); // eat def
+    auto Proto = ParsePrototype();
+    if (!Proto)
+        return nullptr;
+
+    auto Expr = ParseExpression();
+    if (!Expr)
+        return nullptr;
+        
+    return std::unique_ptr<FunctionAST>(
+            new FunctionAST(std::move(Proto), std::move(Expr))
+        );
+}
+
+static uptrProto ParseExtern()
+{
+    getNextToken(); //eat extern;
+    return ParsePrototype();
+}
+
+static std::unique_ptr<FunctionAST> ParseTopLevelExpr()
+{
+    if (auto Expr = ParseExpression())
+    {
+        auto Proto = std::unique_ptr<PrototypeAST>(
+            new PrototypeAST("", std::vector<std::string>())
+        );
+        return std::unique_ptr<FunctionAST>(
+            new FunctionAST(std::move(Proto), std::move(Expr))
+        );
+    }
+    return nullptr;
+}
+
+// Driver
+static void HandleDefinition()
+{
+    if (ParseDefinition())
+        fprintf(stderr, "Parsed a function definition.\n");
+    else
+        getNextToken();
+}
+
+static void HandleExtern()
+{
+    if (ParseExtern())
+        fprintf(stderr, "Parsed an extern.\n");
+    else
+        getNextToken();
+}
+
+static void HandleTopLevelExpr()
+{
+    if (ParseTopLevelExpr())
+        fprintf(stderr, "Parsed a top level expression.\n");
+    else
+        getNextToken();
+}
+
+static void MainLoop()
+{
+    while (true)
+    {
+        fprintf(stderr, "ready> ");
+
+        switch (Curtok)
+        {
+        case ';':
+            getNextToken();
+            break;
+        case tok_def:
+            HandleDefinition();
+            break;
+        case tok_extern:
+            HandleExtern();
+            break;
+        default:
+            HandleTopLevelExpr();
+            break;
+        }
+    }
+}
+
+
+int main()
+{
+    BinOpPrecedence['<'] = 10;
+    BinOpPrecedence['+'] = 20;
+    BinOpPrecedence['-'] = 20;
+    BinOpPrecedence['*'] = 40;
+
+    fprintf(stderr, "ready> ");
+    getNextToken();
+
+    MainLoop();
+    return 0;
 }
