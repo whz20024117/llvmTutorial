@@ -1,0 +1,1 @@
+clang++-10 -g -O3 toy.cpp `llvm-config-10 --cxxflags --ldflags --system-libs --libs`
