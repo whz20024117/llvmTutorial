@@ -524,6 +524,8 @@ llvm::Function *PrototypeAST::codegen()
 }
 
 
+//TODO: add function individual modules....
+
 llvm::Function* FunctionAST::codegen()
 {
     // Find if the function is already defined using extern
